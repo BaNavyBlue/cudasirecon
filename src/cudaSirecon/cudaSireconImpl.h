@@ -109,6 +109,7 @@ struct ReconParams {
   float *phaseSteps; /** user-specified non-ideal phase steps, one for each orientation */
   bool  bTwolens;    /** whether to process I{^5}S dataset */
   bool  bFastSIM;   /** fast SIM data is organized differently */
+  bool  bmfSIM;      /** MF SIM requries Seven Band reconstruction*/
   bool  bBessel;    /** whether to process Bessel-Sheet SIM dataset */
   float BesselNA;  /* excitation NA of the Bessel beam */
   float BesselLambdaEx; /* excitation wavelength of the Bessel beam */
@@ -119,7 +120,6 @@ struct ReconParams {
   bool  bWriteTitle;   /** whether to write command line args to title field in mrc header */
 
   /* algorithm related parameters */
-  float otfcutoff; /** below which OTF value will be deemed as noise and not used in makeoverlaps*/
   float zoomfact;
   int   z_zoom;
   int   nzPadTo;  /** pad zero sections to this number of z sections */
@@ -140,6 +140,7 @@ struct ReconParams {
   bool  equalizet;
   bool  bNoKz0;   /** if true, no kz=0 plane is used in modamp fit and assemblerealspace() */
   float wiener, wienerInr;
+  int dKZ; /** This is used for axial displacement in whole voxels for 7 phase MF-SIM*/
   // // int   bUseEstimatedWiener;
   std::vector<float> forceamp;
   // float *k0angles;
@@ -176,6 +177,7 @@ struct ReconParams {
   bool bTIFF;
   std::string ifiles;
   std::string ofiles;
+  std::string psffiles;
   std::string otffiles;
 };
 struct ImageParams {
@@ -235,6 +237,7 @@ struct ReconData {
   std::vector<double> sum_dir0_phase0;
   GPUBuffer bigbuffer;
   GPUBuffer outbuffer;
+  std::vector<std::vector<GPUBuffer>> firstbands; // creating these to sum MFM 1a and 1b bands
 };
 
 
@@ -268,7 +271,7 @@ void bgAndSlope(const ReconParams& myParams,
 void getbg_and_slope(const char *corrfiles, float *background,
     float *slope, int nx, int ny);
 
-void makematrix(int nphases, int norders, int dir, float *arrPhases,
+void makematrix(int nphases, int norders, bool mfSIM, int dir, float *arrPhases,
     float *sepMatrix, float * noiseVarFactors);
 
 void allocSepMatrixAndNoiseVarFactors(const ReconParams& params,
@@ -320,7 +323,7 @@ void writeResult(int it, int iw, const ReconParams& params,
 void saveCommandLineToHeader(int argc, char **argv, IW_MRC_HEADER &header);
 #endif
 
-void dumpBands(std::vector<GPUBuffer>* bands, int nx, int ny, int nz0);
+void dumpBands(std::vector<GPUBuffer>* bands, int nx, int ny, int nz0, int direction);
 
 void deviceMemoryUsage();
 

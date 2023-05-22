@@ -39,6 +39,9 @@ void fixdrift_2D(std::vector<GPUBuffer>* CrawImages,
 void separate(int nx, int ny, int z, int direction, int nphases, int
     norders, std::vector<GPUBuffer>*rawImages, float *sepMatrix);
 
+void axialShift(int nx, int ny, int nz, int direction, int nphases,
+    int norders, std::vector<GPUBuffer> *bands, int dKZ);
+
 void makemodeldata(int nx, int ny, int nz, std::vector<GPUBuffer>* bands,
     int norders, vector k0, float dy, float dz,
     std::vector<GPUBuffer>* OTF, short wave, ReconParams *pParams);
@@ -61,7 +64,7 @@ float findrealspacemodamp(std::vector<GPUBuffer>* bands,
     int order1, int order2, vector k0, float dy, float dz,
     std::vector<GPUBuffer>* OTF, short wave, cuFloatComplex* modamp1,
     cuFloatComplex* modamp2, cuFloatComplex* modamp3, int redoarrays,
-    ReconParams *pParams);
+    ReconParams *pParams, int norders);
 
 void filterbands(int dir, std::vector<GPUBuffer>* bands,
     const std::vector<vector>& k0, int ndirs, int norders,

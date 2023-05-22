@@ -25,10 +25,11 @@ void SetDefaultParams(ReconParams *pParams)
   pParams->norders_output = 0;
   pParams->bTwolens = false;
   pParams->bFastSIM = false;
+  pParams->bmfSIM = false;
   pParams->bBessel = false;
   pParams->BesselNA = 0.45;
+  pParams->dKZ = 0; // for MF-SIM this is first order axial delata in whole voxels
 
-  pParams->otfcutoff = 0.006;
   pParams->zoomfact = 2;
   pParams->z_zoom = 1;
   pParams->nzPadTo = 0;
@@ -133,6 +134,25 @@ void allocateImageBuffers(const ReconParams& params,
       data->savedBands[i][j].setToZero();
     }
   }
+  // if (params.bmfSIM) {
+  //   data->firstbands.clear();
+  //   data->firstbands.reserve(params.ndirs);
+  //   for (int i = 0; i < params.ndirs; ++i) {
+  //     data->firstbands.push_back(std::vector<GPUBuffer>());
+  //     data->firstbands[i].reserve(2); // These are for summing the axially displaced 1a and 1b bands
+  //     for (int j = 0; j < 2; ++j) {
+  //       data->firstbands[i].push_back(GPUBuffer(
+  //           (imgParams.nx / 2 + 1) * imgParams.ny * imgParams.nz0 *
+  //           sizeof(cuFloatComplex), 0));
+  //     }
+  //   }
+  //   for (int i = 0; i < params.ndirs; ++i) {
+  //     for (int j = 0; j < 2; ++j) {
+  //       data->firstBands[i][j].setToZero();
+  //     }
+  //   }
+  // }
+
 }
 
 
@@ -212,21 +232,23 @@ void findModulationVectorsAndPhasesForAllDirections(
 
     std::vector<float> phaseList(params->nphases);
     if (params->phaseSteps != 0) {
-      // User specified the non-ideal (i.e., not 2pi/5) phase steps for
+      // User specified the non-ideal (i.e., not 2pi/5 or MF-SIM spacing) phase steps for
       // each orientation. Under this circumstance, calculate the
       // non-ideal sepMatrix:
       for (int i = 0; i < params->nphases; ++i) {
         phaseList[i] = i * params->phaseSteps[direction];
       }
-      makematrix(params->nphases, params->norders, direction,
+      makematrix(params->nphases, params->norders, params->bmfSIM, direction,
           &(phaseList[0]), (&data->sepMatrix[0]),
           &(data->noiseVarFactors[0]));
     }
 
     // Unmixing info components in real or reciprocal space:
+
     separate(imgParams.nx, imgParams.ny, imgParams.nz,
         direction, params->nphases, params->norders,
         rawImages, &data->sepMatrix[0]);
+
 
 #ifndef NDEBUG
     for (int phase = 0; phase < params->nphases; ++phase) {
@@ -256,13 +278,24 @@ void findModulationVectorsAndPhasesForAllDirections(
       cufftDestroy(fftplan1D);
     }
 
+    // This seems like a good place to handle MF-SIM 1a and 1b bands
+    int temp_norders = params->norders;
+    int temp_nphases = params->nphases;
+    if (params->bmfSIM) {
+      axialShift(imgParams.nx, imgParams.ny, imgParams.nz, direction, params->nphases,
+                  params->norders, bands, params->dKZ);   
+      //std::cout << "We did Axial Shift" << std::endl;
+      temp_norders--;
+      temp_nphases = 5;
+    }
+    //dumpBands(bands, imgParams.nx, imgParams.ny, imgParams.nz, direction);
     if (params->bMakemodel) {
       /* Use the OTF to simulate an ideal point source; replace bands
        * with simulated data
        * DM: k0 is not initialized but has memory allocate at this point.
        * k0 initialization code is near lines 430ff in sirecon.c */
       makemodeldata(imgParams.nx, imgParams.ny, imgParams.nz0, bands,
-          params->norders, data->k0[direction], imgParams.dxy, imgParams.dz,
+          temp_norders, data->k0[direction], imgParams.dxy, imgParams.dz,
           &data->otf[0], imgParams.wave[0], params);
     }
 
@@ -299,10 +332,9 @@ void findModulationVectorsAndPhasesForAllDirections(
       printf("k0guess[direction %d] = (%f, %f) pixels\n", direction,
           data->k0guess[direction].x/dkx, data->k0guess[direction].y/dky);
     }
-
     // Now to fix 3D drift between dirs estimated by determinedrift_3D()
     if (direction != 0 && params->bFixdrift) {
-      fixdrift_bt_dirs(bands, params->norders, driftParams->drift_bt_dirs[direction],
+      fixdrift_bt_dirs(bands, temp_norders, driftParams->drift_bt_dirs[direction],
                        imgParams.nx, imgParams.ny, imgParams.nz0);
     }
 
@@ -315,18 +347,16 @@ void findModulationVectorsAndPhasesForAllDirections(
     int dir_=0;
     if (params->bOneOTFperAngle)
       dir_ = direction;
-
     if (params->bSearchforvector &&
-        !(imgParams.ntimes > 1 && imgParams.curTimeIdx > 0 && params->bUseTime0k0)) {
+        !(imgParams.ntimes > 1 && imgParams.curTimeIdx > 0 && params->bUseTime0k0 )) {
       /* In time series, can choose to use the time 0 k0 fit for the
        * rest of the series.
        * Find initial estimate of modulation wave vector k0 by
        * cross-correlation. */
       findk0(bands, &data->overlap0, &data->overlap1, imgParams.nx,
-             imgParams.ny, imgParams.nz0, params->norders,
+             imgParams.ny, imgParams.nz0, temp_norders,
              &(data->k0[direction]), imgParams.dxy, imgParams.dz, &(data->otf[dir_]),
              imgParams.wave[0], params);
-
       if (params->bSaveOverlaps) {
         // output the overlaps
         if (params->bTIFF) {
@@ -365,10 +395,10 @@ void findModulationVectorsAndPhasesForAllDirections(
        * recalculating the overlap arrays */
 
       fitk0andmodamps(bands, &data->overlap0, &data->overlap1, imgParams.nx,
-          imgParams.ny, imgParams.nz0, params->norders, &(data->k0[direction]),
+          imgParams.ny, imgParams.nz0, temp_norders, &(data->k0[direction]),
           imgParams.dxy, imgParams.dz, &(data->otf[dir_]), imgParams.wave[0],
           &data->amp[direction][0], params);
-
+      printf("after fitk0andmodamp\n");
       if (imgParams.curTimeIdx == 0) {
         data->k0_time0[direction] = data->k0[direction];
       }
@@ -386,20 +416,21 @@ void findModulationVectorsAndPhasesForAllDirections(
           && dist > 2*K0_WARNING_THRESH) {
         data->k0[direction] = data->k0_time0[direction];
         printf("k0 estimate of time point 0 is used instead\n");
-        for (int order = 1; order < params->norders; ++order) {
+        for (int order = 1; order < temp_norders; ++order) {
           float corr_coeff;
-          if (imgParams.nz0>1)
+          if (imgParams.nz0>1){
             corr_coeff = findrealspacemodamp(bands, &data->overlap0,
               &data->overlap1, imgParams.nx, imgParams.ny, imgParams.nz0,
               0, order, data->k0[direction], imgParams.dxy, imgParams.dz,
               &(data->otf[dir_]), imgParams.wave[0], &data->amp[direction][order],
-              &amp_inv, &amp_combo, 1, params);
-          else
+              &amp_inv, &amp_combo, 1, params, temp_norders);
+          }else{
             corr_coeff = findrealspacemodamp(bands, &data->overlap0,
               &data->overlap1, imgParams.nx, imgParams.ny, imgParams.nz0,
               order-1, order, data->k0[direction], imgParams.dxy, imgParams.dz,
               &(data->otf[dir_]), imgParams.wave[0], &data->amp[direction][order],
-              &amp_inv, &amp_combo, 1, params);
+              &amp_inv, &amp_combo, 1, params, temp_norders);
+          }
           printf("modamp mag=%f, phase=%f\n, correlation coeff=%f\n\n",
                  cmag(data->amp[direction][order]),
                  atan2(data->amp[direction][order].y, data->amp[direction][order].x),
@@ -410,12 +441,12 @@ void findModulationVectorsAndPhasesForAllDirections(
       /* assume k0 vector known, so just fit for the modulation amplitude and phase */
       printf("known k0 for direction %d = (%f, %f) pixels \n", direction, 
           data->k0[direction].x/dkx, data->k0[direction].y/dky);
-      for (int order = 1; order < params->norders; ++order) {
+      for (int order = 1; order < temp_norders; ++order) {
         float corr_coeff = findrealspacemodamp(bands, &data->overlap0,
             &data->overlap1, imgParams.nx, imgParams.ny, imgParams.nz0, 
             0, order, data->k0[direction], imgParams.dxy, imgParams.dz,
             &(data->otf[dir_]), imgParams.wave[0], &data->amp[direction][order],
-            &amp_inv, &amp_combo, 1, params);
+            &amp_inv, &amp_combo, 1, params, temp_norders);
         printf("modamp mag=%f, phase=%f\n",
             cmag(data->amp[direction][order]),
             atan2(data->amp[direction][order].y, data->amp[direction][order].x));
@@ -446,11 +477,10 @@ void findModulationVectorsAndPhasesForAllDirections(
         #endif
       }
     }     /* if(searchforvector) ... else ... */
-
     if (imgParams.nz == 1) {
       /* In 2D SIM, amp stores modamp's between each adjacent pair of
        * bands. We want to convert this to modamp w.r.t. order 0 */
-      for (int order = 2; order < params->norders; ++order) {
+      for (int order = 2; order < temp_norders; ++order) {
         data->amp[direction][order] = cmul(data->amp[direction][order],
             data->amp[direction][order - 1]);
       }
@@ -459,7 +489,7 @@ void findModulationVectorsAndPhasesForAllDirections(
     if (params->forceamp[0] > 0.0) {
       /* force modamp's amplitude to be a value user provided (ideally
        * should be 1)  */
-      for (int order = 1; order < params->norders; ++order) {
+      for (int order = 1; order < temp_norders; ++order) {
         float a = cmag(data->amp[direction][order]);
         if (a < params->forceamp[order-1]) {
           float ampfact = params->forceamp[order-1] / a;
@@ -480,7 +510,7 @@ void findModulationVectorsAndPhasesForAllDirections(
       cuFloatComplex expiphi;
       cuFloatComplex amplitude;
       float phi;
-      for (int order = 2; order < params->norders; ++order) {
+      for (int order = 2; order < temp_norders; ++order) {
         amplitude.x = cmag(data->amp[direction][order]);
         amplitude.y = 0;
         phi = order * base_phase /*+ M_PI*(order-1)*/;
@@ -491,6 +521,10 @@ void findModulationVectorsAndPhasesForAllDirections(
       }
     }
   } /* end for (dir)  */   /* done finding the modulation vectors and phases for all directions */
+  if (params->bmfSIM) {
+    params->norders--;
+    params->nphases = 5;
+  }
 }
 
 void apodizationDriver(int zoffset, ReconParams* params,
@@ -501,6 +535,7 @@ void apodizationDriver(int zoffset, ReconParams* params,
      * slowly */
     std::vector<GPUBuffer>* rawImages = &(data->savedBands[direction]);
     std::vector<GPUBuffer>* bands = &(data->savedBands[direction]);
+
 
     for (int z = 0; z < imgParams.nz; ++z) {
       for (int phase = 0; phase < params->nphases; ++phase) {
@@ -525,6 +560,8 @@ void rescaleDriver(int it, int iw, int zoffset, ReconParams* params,
      * slowly */
     std::vector<GPUBuffer>* rawImages = &(data->savedBands[direction]);
     std::vector<GPUBuffer>* bands = &(data->savedBands[direction]);
+
+
 
     for (int z = 0; z < imgParams.nz; ++z)
       if (params->do_rescale) {
@@ -588,7 +625,7 @@ void transformXYSlice(int zoffset, ReconParams* params,
     order and direction is calculated based on the non-ideal separation matrix
     */
 /*****************************************************************************/
-void makematrix(int nphases, int norders, int dir, float *arrPhases,
+void makematrix(int nphases, int norders, bool mfSIM, int dir, float *arrPhases,
     float *sepMatrix, float * noiseVarFactors)
 {
   std::cout << "In makematrix." << std::endl;
@@ -596,22 +633,62 @@ void makematrix(int nphases, int norders, int dir, float *arrPhases,
      norders is not necessarily nphases/2+1, in cases such as nonlinear SIM
      where the number of output orders can be smaller.
      */
-  int j, order;
-  float phi, sqrt_nphases, sqrt_2;
+  int j, order, sgnPh, sgnPs;
+  float phi, sqrt_nphases, sqrt_2, psi, phaseVal;
 
   sqrt_nphases = sqrt((float)nphases);
   sqrt_2 = sqrt(2.);
 
   // norders could be less than (nphases+1)/2
-  if (arrPhases == 0) { /* phase values equally spaced between 0 and 2Pi */
-    phi = 2.0 * M_PI / nphases;
-    for (j = 0; j < nphases; ++j) {
-      sepMatrix[0 * nphases + j] = 1.0;
-      for (order = 1; order < norders; ++order) {
-        /* With this definition, bandplus = bandre + i bandim 
-         * has coefficient exp() with unit normalization */
-        sepMatrix[(2 * order - 1) * nphases + j] = cos(j * order * phi);
-        sepMatrix[2 * order * nphases + j] = sin(j * order * phi);
+  if (arrPhases == 0) { /* phase values equally spaced between 0 and 2Pi or 7 phase MF-SIM*/
+    if(mfSIM){
+      phi = 3.0 * M_PI / nphases;
+      psi = M_PI / nphases;
+      for (j = 0; j < nphases; ++j) {
+        // These Signs correspond with -1a band
+        sgnPh = -1;
+        sgnPs = 1;
+        sepMatrix[0 * nphases + j] = 1.0;
+        for (order = 1; order < norders; ++order) {
+          /*Need To Figure This out for 7 phase MFM*/
+          phaseVal = (sgnPs*psi + sgnPh*phi)*j;
+          sepMatrix[(2 * order - 1) * nphases + j] = cos(phaseVal);
+          sepMatrix[2 * order * nphases + j] = sin(phaseVal);
+          /* Couldn't think of a simple method of managing phi and psi 
+             sign and state so handling it for each case */
+          if (order == 1){
+            // These Signs correspond with the 1b band
+            sgnPh = -1;
+            sgnPs = -1;
+          } else if (order == 2) {
+            // These Signs correspond with the -2 band
+            sgnPh = 2;
+            sgnPs = 0;
+          } /*else if (order == 3) {
+            sgnPh = 1;
+            sgnPs = -1;
+          } else if (order == 4) {
+            sgnPh = -1;
+            sgnPs = -1;
+          } else if (order == 5) {
+            sgnPh = 2;
+            sgnPs = 0;
+          } else {
+            sgnPh = -2;
+            sgnPs = 0;
+          }*/
+        }
+      }
+    } else {
+      phi = 2.0 * M_PI / nphases;
+      for (j = 0; j < nphases; ++j) {
+        sepMatrix[0 * nphases + j] = 1.0;
+        for (order = 1; order < norders; ++order) {
+          /* With this definition, bandplus = bandre + i bandim 
+          * has coefficient exp() with unit normalization */
+          sepMatrix[(2 * order - 1) * nphases + j] = cos(j * order * phi);
+          sepMatrix[2 * order * nphases + j] = sin(j * order * phi);
+        }
       }
     }
   }
@@ -760,21 +837,21 @@ cuFloatComplex cmul(cuFloatComplex a, cuFloatComplex b)
 }
 
 
-void dumpBands(std::vector<GPUBuffer>* bands, int nx, int ny, int nz0)
+void dumpBands(std::vector<GPUBuffer>* bands, int nx, int ny, int nz0, int direction)
 {
   int n = 0;
   for (auto i = bands->begin(); i != bands->end(); ++i) {
     std::stringstream s;
 
-    s << "band" << n << ".tif";
+    s << "band" << n << " Angle" << direction << ".tif";
 
-    CPUBuffer buf(nx*ny*nz0*sizeof(float));
+    CPUBuffer buf((nx/2 + 1)*2*ny*nz0*sizeof(float));
     i->set(&buf, 0, buf.getSize(), 0);
-    CImg<> band_tiff((float *) buf.getPtr(), nx, ny, nz0, 1, true);
+    CImg<> band_tiff((float *) buf.getPtr(), (nx/2 + 1)*2, ny, nz0, 1, true);
     band_tiff.save_tiff(s.str().c_str());
 
     std::stringstream ss;
-    ss << "band" << n << ".dat";
+    ss << "band" << n << " Angle" << direction << ".dat";
     std::ofstream os(ss.str().c_str());
     i->dump(os, nx, 0, nx * ny * sizeof(float));
     ++n;
@@ -804,6 +881,7 @@ SIM_Reconstructor::SIM_Reconstructor(int argc, char **argv)
   p.add("input-file", 1);
   p.add("output-file", 1);
   p.add("otf-file", 1);
+  p.add("psf-file", 1);
 
   // parse the commandline
   store(po::command_line_parser(argc, argv).
@@ -919,6 +997,7 @@ int SIM_Reconstructor::setupProgramOptions()
     ("input-file", po::value<std::string>(), "input file name (or data folder in TIFF mode)")
     ("output-file", po::value<std::string>(), "output file name (or filename pattern in TIFF mode)")
     ("otf-file", po::value<std::string>()->required(), "OTF file name")
+    ("psf-file", po::value<std::string>(), "PSF file name")  // FOR MF-SIM
     ("config,c", po::value<std::string>(&m_config_file)->default_value(""),
      "name of a config file with parameters in place of command-line options")
     ("ndirs", po::value<int>(&m_myParams.ndirs)->default_value(3),
@@ -937,8 +1016,6 @@ int SIM_Reconstructor::setupProgramOptions()
      "refractive index of immersion medium")
     ("wiener", po::value<float>(&m_myParams.wiener)->default_value(0.01, "0.01"),
      "Wiener constant; lower value leads to higher resolution and noise; playing with it extensively is strongly encouraged")
-    ("otfcutoff", po::value<float>(&m_myParams.otfcutoff)->default_value(0.006, "0.006"),
-     "otf threshold below which it'll be considered noise and not used in makeoverlaps")
     ("zoomfact", po::value<float>(&m_myParams.zoomfact)->default_value(2.),
      "lateral zoom factor in the output over the input images; leaving it at 2 should be fine in most cases")
     ("zzoom", po::value<int>(&m_myParams.z_zoom)->default_value(1),
@@ -954,6 +1031,8 @@ int SIM_Reconstructor::setupProgramOptions()
     ("otfPerAngle", po::bool_switch(&m_myParams.bOneOTFperAngle), "using one OTF per SIM angle; otherwise one OTF is used for all angles, which is how it's been done traditionally")
     ("fastSI", po::bool_switch(&m_myParams.bFastSIM),
      "SIM image is organized in Z->Angle->Phase order; otherwise assuming Angle->Z->Phase image order")
+    ("mfSIM", po::bool_switch(&m_myParams.bmfSIM), "MFSIM requires 7 phase 7 band data reconstruction")
+    ("dKZ", po::value<int>(&m_myParams.dKZ)->default_value(0), "MF-SIM 1a and 1b bands displacement delta")
     ("k0searchAll", po::value<int>(&m_myParams.bUseTime0k0)->implicit_value(false),
      "search for k0 at all time points")
     ("norescale", po::value<int>(&m_myParams.do_rescale)->implicit_value(false), "no bleach correction")
@@ -1014,6 +1093,10 @@ int SIM_Reconstructor::setParams()
 
   if (m_varsmap.count("input-file")) {
     m_myParams.ifiles = m_varsmap["input-file"].as<std::string>();
+  }
+
+  if (m_varsmap.count("psf-file")){
+    m_myParams.psffiles = m_varsmap["psf-file"].as<std::string>();
   }
   
   if (m_varsmap.count("output-file")) {
@@ -1119,6 +1202,7 @@ void SIM_Reconstructor::setup()
 {
   if (m_myParams.bTIFF) {
     CImg<> tiff0(m_all_matching_files[0].c_str());
+  
     m_imgParams.nx = 0;
     m_imgParams.nx_raw = tiff0.width();
     m_imgParams.ny = tiff0.height();
@@ -1141,6 +1225,9 @@ void SIM_Reconstructor::setup_common()
   // Do we need to keep this?? -lin
   // if (m_myParams.bTIFF)
   //   m_imgParams.nz0 = ::findOptimalDimension(m_imgParams.nz);
+
+  /* Antone: mfm recon will require z padding, both 1 sim frame top and bottom of image stack, and room
+     to shift fourier 1bands in kz */
 
   m_zoffset = 0;
   if (m_myParams.nzPadTo) {  // 'nzPadTo' ~never used
@@ -1223,9 +1310,8 @@ void SIM_Reconstructor::setup_common()
     setupOTFsFromFile();
 
   ::allocSepMatrixAndNoiseVarFactors(m_myParams, &m_reconData);
-  ::makematrix(m_myParams.nphases, m_myParams.norders, 0, 0,
+  ::makematrix(m_myParams.nphases, m_myParams.norders, m_myParams.bmfSIM, 0, (float*)0,
       &(m_reconData.sepMatrix[0]), &(m_reconData.noiseVarFactors[0]));
-
   ::allocateImageBuffers(m_myParams, m_imgParams, &m_reconData);
 
   m_imgParams.inscale = 1.0 / (m_imgParams.nx * m_imgParams.ny * m_imgParams.nz0 *
@@ -1258,13 +1344,13 @@ void SIM_Reconstructor::setup_common()
     m_reconData.amp[i][0].x = 1.0f;
     m_reconData.amp[i][0].y = 0.0f;
   }
+  std::cout << "bottom of argc argv constructor" << std::endl;
 }
 
 
 int SIM_Reconstructor::processOneVolume()
 {
   // process one SIM volume (i.e., for the time point timeIdx)
-
   m_reconData.bigbuffer.resize(0);
   m_reconData.outbuffer.resize(0);
 
@@ -1310,6 +1396,7 @@ int SIM_Reconstructor::processOneVolume()
                 m_imgParams.dxy, m_imgParams.dz, m_reconData.amp,
                 m_reconData.noiseVarFactors, m_imgParams.nx, m_imgParams.ny,
                 m_imgParams.nz0, m_imgParams.wave[0], &m_myParams);
+    
     assemblerealspacebands(
         direction, &m_reconData.outbuffer, &m_reconData.bigbuffer,
         &m_reconData.savedBands[direction], m_myParams.ndirs,
@@ -1339,6 +1426,7 @@ void SIM_Reconstructor::setFile(int it, int iw)
   if (m_myParams.bTIFF) {
     rawImage.assign(m_all_matching_files[it].c_str());
   }
+  
   #ifdef MRC
   else {
     rawImage.assign(m_imgParams.nx_raw, m_imgParams.ny, m_imgParams.nz * m_myParams.nphases * m_myParams.ndirs);
@@ -1348,10 +1436,13 @@ void SIM_Reconstructor::setFile(int it, int iw)
     }
   }
   #endif
+
   loadImageData(it, iw);
+
 }
 
 void SIM_Reconstructor::loadImageData(int it, int iw) {
+  std::cout << "in load image data" << std::endl;
   float dskewA = m_myParams.deskewAngle;
   // if ( dskewA<0) dskewA += 180.; already done in setup_common()
   float deskewFactor = 0;
@@ -1415,7 +1506,9 @@ void SIM_Reconstructor::loadImageData(int it, int iw) {
         ++zsec;
       }  // end for (phase)
     }    // end for (z)
-
+  }
+    
+  
 #ifndef NDEBUG
     for (auto i = rawImages->begin(); i != rawImages->end(); ++i)
       assert(i->hasNaNs() == false);
@@ -1431,7 +1524,7 @@ void SIM_Reconstructor::loadImageData(int it, int iw) {
       //   return;
       // }
     }
-  }  // end for (direction)
+      // end for (direction)
 }
 
 void SIM_Reconstructor::setupOTFsFromFile()

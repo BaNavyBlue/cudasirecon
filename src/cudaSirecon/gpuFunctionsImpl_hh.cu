@@ -24,11 +24,12 @@ __constant__ int const_pParams_bNoKz0;
 __constant__ int const_pParams_bFilteroverlaps;
 __constant__ int const_pParams_apodizeoutput;
 __constant__ float const_pParams_apoGamma;
-__constant__ bool const_pParams_bBessel;
+__constant__ int const_pParams_bBessel;
 __constant__ int const_pParams_bRadAvgOTF;
 __constant__ int const_pParams_nzotf;
 __constant__ float const_pParams_dkrotf;
 __constant__ float const_wiener;
+__constant__ int const_dKZ;
 
 /** These data are not modified in the kernels and can go in constant memory */
 __constant__ int const_zdistcutoff[3];
@@ -44,6 +45,7 @@ __constant__ cuFloatComplex * const_otfPtrs[3];
 __constant__ float* const_outputPtrs[MAX_ORDERS * 2 -1];
 __constant__ float* const_imgPtrs[MAX_PHASES];
 __constant__ float const_sepMatrix[(MAX_ORDERS * 2 - 1) * MAX_PHASES];
+__constant__ float* const_firstBandPtrs[2]; // For MF-SIM axial band shifting
 
 __global__ void image_arithmetic_kernel(float* a, const float* b,
     int len, float alpha, float beta);
@@ -61,7 +63,7 @@ __host__ void makeoverlaps(std::vector<GPUBuffer>* bands,
     GPUBuffer* overlap0, GPUBuffer* overlap1, int nx, int ny, int nz,
     int order1, int order2,
     float k0x, float k0y, float dy, float dz,
-    std::vector<GPUBuffer>* OTF, short wave, ReconParams* pParams);
+    std::vector<GPUBuffer>* OTF, short wave, ReconParams* pParams, int norders);
 
 __global__ void makeOverlaps0Kernel(int nx, int ny, int nz,
     int order1, int order2, float kx, float ky,
@@ -97,14 +99,14 @@ __host__ float getmodamp(float kangle, float klength,
     std::vector<GPUBuffer>* bands, GPUBuffer* overlap0, GPUBuffer* overlap1,
     int nx, int ny,int nz, int order1, int order2, float dy, float dz,
     std::vector<GPUBuffer>* otf, short wave, cuFloatComplex* modamp,
-    int redoarrays, ReconParams *pParams, int bShowDetail); 
+    int redoarrays, ReconParams *pParams, int bShowDetail, int norders); 
 
 __host__ float findrealspacemodamp(std::vector<GPUBuffer>* bands,
     GPUBuffer* overlap0, GPUBuffer* overlap1, int nx, int ny, int nz,
     int order1, int order2, vector k0, float dy, float dz,
     std::vector<GPUBuffer>* OTF, short wave, cuFloatComplex* modamp1,
     cuFloatComplex* modamp2, cuFloatComplex* modamp3, int redoarrays,
-    ReconParams *pParams);
+    ReconParams *pParams, int norders);
 
 __global__ void reductionKernel(
     int nx, int ny, int nz,
@@ -151,6 +153,7 @@ __global__ void filterbands_kernel4(int order, int nx, int ny, int nz,
     cuFloatComplex * dev_bandptr2);
 
 __global__ void separate_kernel(int norders, int nphases, int nx, int ny, int nz);
+__global__ void axialShift_kernel(int norders, int nphases, int nx, int ny, int nz, int dKZ);
 __global__ void computeAminAmax_kernel(const float* data, int numElems,
     float* maxPartialResult, float* minPartialResult);
 
